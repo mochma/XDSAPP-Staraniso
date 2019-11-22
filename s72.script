@@ -1,0 +1,119 @@
+#!/bin/sh -eu
+
+#
+# Argument list:
+# $1: indata
+# $2: utdata  
+# $3: fromrange 
+# $4: torange 
+# 
+
+indir=`realpath -es "$1"`
+outdir=`realpath -es "$2"`
+
+xdsapp_staraniso="\
+module load XDSAPP
+xdsapp --cmd --dir=$outdir/xdsapp -j 8 -c 4 -i $indir  --fried=true --range=$3\ $4 --res=1.0
+module unload XDSAPP
+module load autoPROC
+cd $outdir/pointless
+pointless hklin $outdir/xdsapp/XDS_ASCII.HKL hklout $outdir/pointless/XDS_ASCII<< pointless
+COPY
+pointless
+cd $outdir/aP_scale
+aP_scale -mtz $outdir/pointless/XDS_ASCII.mtz -M HighResCutOnCChalf -id BioMAX -nthreads 32 
+#########################
+# staraniso 1
+#########################
+cd $outdir/staraniso1
+staraniso HKLIN $outdir/aP_scale/BioMAX_aimless_alldata.mtz \
+RESOUT BioMAX-merged-aniso.res \
+MSKOUT BioMAX-merged-aniso.msk \
+RLAXES BioMAX-merged-aniso-rlaxes \
+REDUND BioMAX-merged-aniso-redund \
+ELLIPS BioMAX-merged-aniso-ellips \
+ISMEAN BioMAX-merged-aniso-ismean \
+DWFACT BioMAX-merged-aniso-dwfact \
+HKLOUT BioMAX-merged-aniso.mtz<< staraniso1
+ANOM=f, TITL='staraniso1', HEMI=f, STAT=f, ACUT=t, RENO=f, FUNC=FW, APRI=t, ACOR=t, APPE=f, OVER=t, UNOB=f, POST=f, TISM=1.20 
+staraniso1
+#########################
+# staraniso 2
+#########################
+cd $outdir/staraniso2
+staraniso HKLIN $outdir/pointless/XDS_ASCII.mtz \
+MSKIN $outdir/staraniso1/BioMAX-merged-aniso.msk \
+RESOUT BioMAX-masked-aniso.res \
+RLAXES BioMAX-masked-aniso-rlaxes \
+DWFACT BioMAX-masked-aniso-dwfact \
+HKLOUT BioMAX-masked-aniso.mtz<< staraniso2
+ANOM=f, TITL='staraniso2', HEMI=f, STAT=f, ACUT=t, RENO=f, FUNC=FW, APRI=t, ACOR=f, APPE=f, OVER=t, UNOB=f, POST=f, TISM=1.20 
+staraniso2
+#########################
+# aimless 1
+#########################
+cd $outdir/aimless1
+aimless \
+HKLIN $outdir/staraniso2/BioMAX-masked-aniso.mtz \
+HKLOUT BioMAX-masked-scaled.mtz \
+SCALES BioMAX-masked-scaled.scales<< aimless1
+INIT UNIT
+BINS 10 INTE 10
+SCAL ABSO 6
+ANOM
+aimless1
+#########################
+# aimless 2
+#########################
+cd $outdir/aimless2
+aimless \
+HKLIN $outdir/pointless/XDS_ASCII.mtz \
+HKLOUT BioMAX-masked-merged.mtz<< aimless2
+ONLY
+BINS 10 INTE 10
+REST $outdir/aimless1/BioMAX-masked-scaled.scales
+SCAL ABSO 6
+ANOM
+OUTP UNME
+aimless2
+#########################
+# staraniso 3
+#########################
+cd $outdir/staraniso3
+staraniso HKLIN $outdir/aimless2/BioMAX-masked-merged.mtz \
+RESOUT BioMAX-aniso-merged.res \
+BINOUT bins.txt \
+RLAXES BioMAX-aniso-merged-rlaxes \
+REDUND BioMAX-aniso-merged-redund \
+ELLIPS BioMAX-aniso-merged-ellips \
+ISMEAN BioMAX-aniso-merged-ismean \
+DWFACT BioMAX-aniso-merged-dwfact \
+HKLOUT BioMAX-aniso-merged.mtz \
+MSKOUT BioMAX-aniso-merged.msk<< staraniso3
+ANOM=f, TITL='staraniso3', HEMI=f, STAT=f, ACUT=t, RENO=f, FUNC=FW, APRI=t, ACOR=t, APPE=f, OVER=t, UNOB=f, POST=f, TISM=1.20
+staraniso3
+#########################
+# mrfana2
+#########################
+cd $outdir/mrfana2
+staraniso \
+hklin $outdir/aimless2/BioMAX-masked-merged_unmerged.mtz \
+mskin  $outdir/staraniso3/BioMAX-aniso-merged.msk \
+hklout BioMAX_staraniso_alldata_unmerged_masked.mtz \
+<<mrfana2 
+TITL=BioMAX_staraniso_alldata
+EXPE=t
+ACOR=F
+mrfana2
+"
+
+mkdir "$outdir/xdsapp" "$outdir/pointless" "$outdir/aP_scale" "$outdir/staraniso1" "$outdir/staraniso2"
+mkdir "$outdir/aimless1" "$outdir/aimless2" "$outdir/staraniso3" "$outdir/mrfana2"
+
+job1=`sbatch -N1 --exclusive -t 00:25:00 --ntasks-per-node=32 -J STARANISO -A nsc -o "$outdir/all.out" --wrap="$xdsapp_staraniso" | sed 's/Submitted batch job //'`
+
+sbatch -N1 --exclusive -t 00:05:00 --ntasks-per-node=32 -J mrfana2 -A nsc \
+    -d "afterok:$job1" \
+    -o "$outdir/mrfana2.out" \
+    --wrap="module load autoPROC && cd $outdir/mrfana2 && $outdir/aP_scale/BioMAX_staraniso_alldata.mrfana20_obs_ell.sh"
+# Shell script does not exist until afterok on $job1 so we need to wrap it.
